@@ -141,23 +141,45 @@ export function userClient(session: Session): SupabaseClient {
   return client;
 }
 
+// One page of a storage listing. A full page means there may be more, and this
+// helper never pages, so it throws rather than silently miss objects.
+const LIST_PAGE = 1000;
+
+/** Every object path in the temp-audio bucket (`{uid}/{filename}`). */
+export async function listTestAudio(): Promise<string[]> {
+  const bucket = serviceClient().storage.from(AUDIO_BUCKET);
+  const top = await bucket.list('', { limit: LIST_PAGE });
+  if (top.error) throw top.error;
+  if ((top.data ?? []).length >= LIST_PAGE) throw new Error(`${AUDIO_BUCKET} has ${LIST_PAGE}+ folders; listTestAudio does not page`);
+  const paths: string[] = [];
+  for (const folder of top.data ?? []) {
+    // Folders come back with a null id; objects at the top level have one.
+    if (folder.id !== null) {
+      paths.push(folder.name);
+      continue;
+    }
+    const inner = await bucket.list(folder.name, { limit: LIST_PAGE });
+    if (inner.error) throw inner.error;
+    if ((inner.data ?? []).length >= LIST_PAGE) throw new Error(`${AUDIO_BUCKET}/${folder.name} has ${LIST_PAGE}+ objects; listTestAudio does not page`);
+    for (const obj of inner.data ?? []) paths.push(`${folder.name}/${obj.name}`);
+  }
+  return paths;
+}
+
 /**
  * Deletes every Listen the tests made (every mobile_detections row that is not
- * seeded), and the audio they uploaded. Seeded rows stay.
+ * seeded), and every object in temp-audio. The seed puts no audio in the
+ * bucket, so every object there was uploaded by a test, including uploads that
+ * never got a row and audio of rows a test already deleted. Seeded rows stay.
  */
 export async function resetListens(): Promise<void> {
   const admin = serviceClient();
-  const seeded = `(${SEEDED_LISTEN_IDS.join(',')})`;
-  const { data: rows, error } = await admin
-    .from('mobile_detections')
-    .select('id, audio_path')
-    .not('id', 'in', seeded);
-  if (error) throw error;
-  const paths = (rows ?? []).map((r) => r.audio_path as string | null).filter((p): p is string => !!p);
+  const paths = await listTestAudio();
   if (paths.length) {
     const removed = await admin.storage.from(AUDIO_BUCKET).remove(paths);
     if (removed.error) throw removed.error;
   }
+  const seeded = `(${SEEDED_LISTEN_IDS.join(',')})`;
   const deleted = await admin.from('mobile_detections').delete().not('id', 'in', seeded);
   if (deleted.error) throw deleted.error;
 }

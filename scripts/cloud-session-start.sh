@@ -46,9 +46,23 @@ LOG="${STATE}/session-start.log"
 : > "${LOG}"
 printf 'start\n' > "${STATE}/step"
 
-node "${root}/scripts/lib/bounded.mjs" "${DEADLINE_SECS}" -- \
-  bash "${root}/scripts/lib/stack-body.sh" < /dev/null 2>> "${LOG}"
+# One start at a time per machine: every checkout shares the Supabase project
+# (config.toml project_id), and the body stops and restarts it. The lock is a
+# kernel flock (scripts/lib/with-lock.py), released when its holder exits.
+LOCK="${TMPDIR:-/tmp}/magora-field-app-stack.lock"
+run=(node "${root}/scripts/lib/bounded.mjs" "${DEADLINE_SECS}" -- bash "${root}/scripts/lib/stack-body.sh")
+if command -v python3 > /dev/null 2>&1; then
+  run=(python3 "${root}/scripts/lib/with-lock.py" "${LOCK}" -- "${run[@]}")
+else
+  printf '[lock] python3 not found: starting without the one-start-at-a-time lock\n' >> "${LOG}"
+fi
+"${run[@]}" < /dev/null 2>> "${LOG}"
 rc=$?
+
+if [ "${rc}" -eq 75 ]; then
+  echo "STACK FAILED: lock (another stack start is running; ${LOCK})"
+  exit 0
+fi
 
 # The body prints its own result line and exits 0. Otherwise it was stopped
 # before it could: report the step it was on.

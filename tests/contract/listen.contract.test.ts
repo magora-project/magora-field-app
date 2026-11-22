@@ -15,6 +15,7 @@ import {
   TEST_AUDIO,
   createCompleteDraft,
   insertPendingListen,
+  listTestAudio,
   localClient,
   readOwnListen,
   resetListens,
@@ -115,5 +116,24 @@ describe('Listen contract', () => {
     const row = await waitForListenStatus(db, id, 'failed');
     expect(row?.status).toBe('failed');
     expect(row?.species).toBeNull();
+  });
+});
+
+describe('test helpers', () => {
+  test('resetListens removes audio with no row and audio of deleted rows', async () => {
+    // An upload that never got a row (as in the upload test).
+    const orphanName = `orphan-${randomUUID()}.m4a`;
+    const orphan = await uploadViaFunction(session, AUDIO_BUCKET, orphanName, TEST_AUDIO);
+    expect(orphan.body.path).toBe(`${uid}/${orphanName}`);
+    // A discarded draft: its row is gone, its audio is not.
+    const draft = await createCompleteDraft(session);
+    expect((await db.from('mobile_detections').delete().eq('id', draft)).error).toBeNull();
+    const before = await listTestAudio();
+    expect(before).toContain(`${uid}/${orphanName}`);
+    expect(before).toContain(`${uid}/${draft}.m4a`);
+
+    await resetListens();
+
+    expect(await listTestAudio()).toEqual([]);
   });
 });

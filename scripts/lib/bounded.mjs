@@ -15,13 +15,15 @@
 // - Otherwise: the command's exit status (128 + signal number if a signal ended it;
 //   127 if it could not be started).
 //
-// The group is signalled only while the command has not been reaped. Node reaps
-// the child and sets child.exitCode / child.signalCode (then emits 'exit') in
-// one synchronous step, so while both are null the child exists, at least as a
-// zombie, and its PID, which is the group ID, cannot have been reused. After the
-// leader exits, the group is never signalled again: a group member that outlives
-// the leader and ignores SIGTERM is left running. That is the cost of never
-// signalling an ID the kernel may have reused.
+// Once a stop starts, the whole group is supervised, not just its leader: if the
+// leader exits on SIGTERM while another member ignores it, this script keeps
+// running through the grace and SIGKILLs whatever is left of the group, then
+// exits. A group ID cannot be handed out again while any member of the group
+// exists, and each signal is sent only after a signal-0 probe finds the group
+// still populated. The remaining window, between the last member exiting and a
+// new process receiving that same number as its PID within the grace period,
+// needs a full PID wraparound in a few seconds; it is accepted. A leader that
+// exits on its own, with no stop under way, ends supervision at once.
 //
 // Grace: 5 s for a top-level instance; 3 s for an instance running under another
 // bounded.mjs (BOUNDED_DEPTH, set for the child below). A nested instance in the
@@ -54,9 +56,21 @@ const child = spawn(cmd, args, {
 
 const unreaped = () => child.exitCode === null && child.signalCode === null;
 
-// Signals the child's group, only while the child is unreaped (see above).
+// True while the child's process group still has a member (signal 0 probe).
+function groupAlive() {
+  if (child.pid === undefined) return false;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (err) {
+    if (err.code !== 'ESRCH') say(`kill(-${child.pid}, 0): ${err.message}`);
+    return false;
+  }
+}
+
+// Signals the child's group, only while it still has a member (see above).
 function signalGroup(sig) {
-  if (!unreaped() || child.pid === undefined) return;
+  if (!groupAlive()) return;
   try {
     process.kill(-child.pid, sig);
   } catch (err) {
@@ -72,23 +86,34 @@ function finish(status) {
   process.exit(status);
 }
 
-// TERM the group; KILL it after the grace unless the leader has exited; then
-// exit with <status>, waiting at most REAP_WAIT_MS for the leader after KILL.
+// TERM the group; finish as soon as the leader is reaped and the group is empty;
+// otherwise KILL what is left of the group after the grace, then exit with
+// <status>, waiting at most REAP_WAIT_MS for the leader after KILL.
 function stop(status, why) {
   if (stopping !== null) return;
   stopping = status;
   clearTimeout(limitTimer);
   say(`${why}: SIGTERM to process group ${child.pid}`);
   signalGroup('SIGTERM');
-  setTimeout(() => {
-    if (!unreaped()) return; // the 'exit' handler has already finished
-    say(`process group ${child.pid} outlived the ${GRACE_MS / 1000} s grace: SIGKILL`);
-    signalGroup('SIGKILL');
-    setTimeout(() => {
-      say(`process ${child.pid} not reaped ${REAP_WAIT_MS / 1000} s after SIGKILL; exiting without it`);
+  const graceEnd = Date.now() + GRACE_MS;
+  const poll = setInterval(() => {
+    if (!unreaped() && !groupAlive()) {
+      clearInterval(poll);
       finish(status);
-    }, REAP_WAIT_MS);
-  }, GRACE_MS);
+    } else if (Date.now() >= graceEnd) {
+      clearInterval(poll);
+      say(`process group ${child.pid} outlived the ${GRACE_MS / 1000} s grace: SIGKILL`);
+      signalGroup('SIGKILL');
+      const reapEnd = Date.now() + REAP_WAIT_MS;
+      const reap = setInterval(() => {
+        if (!unreaped() || Date.now() >= reapEnd) {
+          clearInterval(reap);
+          if (unreaped()) say(`process ${child.pid} not reaped ${REAP_WAIT_MS / 1000} s after SIGKILL; exiting without it`);
+          finish(status);
+        }
+      }, 100);
+    }
+  }, 100);
 }
 
 child.on('error', (err) => {
@@ -100,8 +125,8 @@ child.on('error', (err) => {
 });
 
 child.on('exit', (code, signal) => {
-  if (stopping !== null) finish(stopping);
-  else if (code !== null) finish(code);
+  if (stopping !== null) return; // stop() supervises the rest of the group
+  if (code !== null) finish(code);
   else finish(128 + (constants.signals[signal] ?? 0));
 });
 
