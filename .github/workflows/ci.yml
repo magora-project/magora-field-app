@@ -24,11 +24,23 @@ jobs:
 
   contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: echo "contract: filled by Task 4"
+      # Installs the pinned Supabase CLI (2.118.0, checksum-verified), runs npm ci,
+      # and fetches the pinned portal migrations and storage-upload function.
+      - run: bash scripts/cloud-setup.sh
+      # CI=true makes the session script start the stack. It always exits 0, so
+      # the job checks its result line.
+      - name: Start the local stack
+        run: |
+          bash scripts/cloud-session-start.sh | tee "${RUNNER_TEMP}/stack.out"
+          grep -qx 'STACK READY' "${RUNNER_TEMP}/stack.out"
+      - run: npm run test:contract
+      - name: Stack logs
+        if: failure()
+        run: tail -n 200 .stack/*.log || true

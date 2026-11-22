@@ -1,0 +1,5 @@
+<!-- Local stack only. The portal's sign-in (src/components/AuthModal.jsx) asks for
+     the 6-digit code from this email, so the local template carries the code;
+     the CLI's default template carries only a link. -->
+<h2>Your Magora sign-in code</h2>
+<p>Enter this code: {{ .Token }}</p>
