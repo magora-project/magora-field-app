@@ -7,6 +7,13 @@
 # is "true"), in CI (CI is "true"), or when asked (FIELD_STACK=1). Anywhere else
 # it prints STACK SKIPPED and exits 0, so a local session never starts Docker.
 #
+# Scope: one checkout per machine, one start at a time. That is what a cloud VM
+# and a CI runner are. The Supabase project (config.toml project_id) and port
+# 8787 are machine-wide, and every start stops and reseeds them, so two
+# checkouts, or two overlapping starts, on one machine reset each other's stack.
+# Nothing here guards against that: on your own machine, run FIELD_STACK=1 from
+# one checkout at a time, and not while another run's contract tests are going.
+#
 # The full start is scripts/lib/stack-body.sh (its header lists the steps). It
 # prints one result line: STACK READY, or STACK FAILED: <step>. This script
 # always exits 0, so a failure leaves the session usable for work that needs no
@@ -46,23 +53,9 @@ LOG="${STATE}/session-start.log"
 : > "${LOG}"
 printf 'start\n' > "${STATE}/step"
 
-# One start at a time per machine: every checkout shares the Supabase project
-# (config.toml project_id), and the body stops and restarts it. The lock is a
-# kernel flock (scripts/lib/with-lock.py), released when its holder exits.
-LOCK="${TMPDIR:-/tmp}/magora-field-app-stack.lock"
-run=(node "${root}/scripts/lib/bounded.mjs" "${DEADLINE_SECS}" -- bash "${root}/scripts/lib/stack-body.sh")
-if command -v python3 > /dev/null 2>&1; then
-  run=(python3 "${root}/scripts/lib/with-lock.py" "${LOCK}" -- "${run[@]}")
-else
-  printf '[lock] python3 not found: starting without the one-start-at-a-time lock\n' >> "${LOG}"
-fi
-"${run[@]}" < /dev/null 2>> "${LOG}"
+node "${root}/scripts/lib/bounded.mjs" "${DEADLINE_SECS}" -- \
+  bash "${root}/scripts/lib/stack-body.sh" < /dev/null 2>> "${LOG}"
 rc=$?
-
-if [ "${rc}" -eq 75 ]; then
-  echo "STACK FAILED: lock (another stack start is running; ${LOCK})"
-  exit 0
-fi
 
 # The body prints its own result line and exits 0. Otherwise it was stopped
 # before it could: report the step it was on.

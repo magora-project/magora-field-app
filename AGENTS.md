@@ -23,7 +23,7 @@ The local Supabase stack, started by `bash scripts/cloud-session-start.sh`, is t
 - `npm run lint`: ESLint
 - `npm test`: Jest unit tests (`tests/unit`); needs no backend
 - `npm run test:contract`: contract tests against the local Supabase stack (start it first)
-- `bash scripts/cloud-session-start.sh`: starts the local Supabase stack and loads the schema and seed (Task 4)
+- `bash scripts/cloud-session-start.sh`: starts the local Supabase stack and loads the schema and seed (Task 4). It starts the stack only in a cloud session, in CI, or with `FIELD_STACK=1`. Every start resets the machine-wide stack, so locally run it from one checkout at a time and never alongside another run.
 
 ## Flow
 
