@@ -155,21 +155,39 @@ stop_recorded() {
     return 0
   fi
   note "stopping ${name} (PID ${pid}, started ${started})"
-  kill -TERM -- "$(signal_target "${pid}")" 2>/dev/null
+  # The target is fixed here, while the identity check above still holds. For a
+  # group leader it is the whole group ("-<pid>"), and the group is supervised
+  # to the end, not just its leader: a member that ignores SIGTERM is killed
+  # even if the leader has already exited. A group ID cannot be handed out
+  # again while any member exists, and each group signal follows a signal-0
+  # probe that found it populated.
+  local target
+  target="$(signal_target "${pid}")"
+  kill -TERM -- "${target}" 2>/dev/null
   for ((i = 0; i < 20; i++)); do
     sleep 0.5
-    is_recorded "${pid}" "${started}" "${expect}" || { note "${name} (PID ${pid}) stopped"; return 0; }
+    target_alive "${target}" "${pid}" "${started}" "${expect}" || { note "${name} (PID ${pid}) stopped"; return 0; }
   done
   note "${name} (PID ${pid}) ignored SIGTERM for 10 s; sending SIGKILL"
-  is_recorded "${pid}" "${started}" "${expect}" || return 0
-  kill -KILL -- "$(signal_target "${pid}")" 2>/dev/null
+  target_alive "${target}" "${pid}" "${started}" "${expect}" || return 0
+  kill -KILL -- "${target}" 2>/dev/null
   # Wait (no more signals) so its ports are free before the new start.
   for ((i = 0; i < 20; i++)); do
-    is_recorded "${pid}" "${started}" "${expect}" || return 0
+    target_alive "${target}" "${pid}" "${started}" "${expect}" || return 0
     sleep 0.1
   done
   note "${name} (PID ${pid}) still present after SIGKILL"
   return 0
+}
+
+# target_alive <target> <pid> <start time> <command fragment>: for a group target
+# ("-<pid>"), true while the group has any member; for a bare PID, true while
+# that PID is still the recorded process.
+target_alive() {
+  case "$1" in
+    -*) kill -0 -- "$1" 2>/dev/null ;;
+    *) is_recorded "$2" "$3" "$4" ;;
+  esac
 }
 
 # start_daemon <name> <command...>: starts the command in its own session, with
