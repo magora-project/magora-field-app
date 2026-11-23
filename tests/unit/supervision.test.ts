@@ -57,16 +57,26 @@ function killSleepers(marker: string) {
   }
 }
 
-// A leader that exits on SIGTERM, with a child that ignores SIGTERM.
+// A leader that exits on SIGTERM, with a child that ignores SIGTERM. The
+// `sleep <marker>` process exists only after the trap is set, since it is
+// exec'd from the trapped subshell.
 const treeScript = (marker: string, leaderTail: string) =>
   `(trap '' TERM; exec sleep ${marker}) & ${leaderTail}`;
 
 describe('bounded.mjs', () => {
   test('kills a TERM-ignoring descendant after its leader exits on TERM', () => {
     const marker = newMarker();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'supervision-'));
+    const armed = path.join(dir, 'armed');
     try {
+      // The leader writes `armed` only once the child is `sleep <marker>`, so
+      // TERM-ignoring, and only then waits. Without `armed`, the deadline's
+      // TERM may have come first and the test would prove nothing.
+      const leaderTail =
+        `while ! pgrep -f '^sleep ${marker}$' > /dev/null; do sleep 0.05; done; ` +
+        `: > '${armed}'; sleep 1000`;
       const t0 = Date.now();
-      const r = spawnSync('node', [BOUNDED, '1', '--', 'bash', '-c', treeScript(marker, 'sleep 1000')], {
+      const r = spawnSync('node', [BOUNDED, '2', '--', 'bash', '-c', treeScript(marker, leaderTail)], {
         // No pipes: a surviving descendant would hold them open and hang
         // spawnSync. The timeout makes a regression fail instead of hang.
         stdio: 'ignore',
@@ -74,12 +84,14 @@ describe('bounded.mjs', () => {
         env: { ...process.env, BOUNDED_DEPTH: '' },
       });
       const secs = (Date.now() - t0) / 1000;
+      expect(fs.existsSync(armed)).toBe(true);
       expect(r.status).toBe(124);
-      // 1 s limit + 5 s grace + reap wait, with slack; never unbounded.
-      expect(secs).toBeLessThan(12);
+      // 2 s limit + 5 s grace + reap wait, with slack; never unbounded.
+      expect(secs).toBeLessThan(13);
       expect(sleepersAfter(marker)).toEqual([]);
     } finally {
       killSleepers(marker);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });
@@ -240,11 +252,59 @@ describe('stop_recorded (stack-body.sh)', () => {
       fs.chmodSync(dir, 0o555); // .members.tmp cannot be created
       const r = stopRecorded(marker);
       fs.chmodSync(dir, 0o755);
-      expect(r.status).toBe(0);
+      expect(r.status).toBe(1);
       expect(isAlive(leader)).toBe(true);
       expect(sleepers(marker)).toHaveLength(1);
       expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(true);
       expect(fs.existsSync(path.join(dir, 'svc.members'))).toBe(false);
+    } finally {
+      fs.chmodSync(dir, 0o755);
+      if (leader) {
+        try {
+          process.kill(-leader, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+      killSleepers(marker);
+    }
+  });
+
+  test('ends startup, before starting anything, when a previous service cannot be stopped', () => {
+    const marker = newMarker();
+    let leader = 0;
+    try {
+      // A recorded `functions serve`: its command line carries the fragment.
+      execFileSync('node', [
+        SPAWN_DAEMON,
+        path.join(dir, 'functions.pid'),
+        path.join(dir, 'functions.log'),
+        '--',
+        'bash',
+        '-c',
+        treeScript(marker, 'wait'),
+        'functions',
+        'serve',
+      ]);
+      const end = Date.now() + 3000;
+      while (!sleepers(marker).length && Date.now() < end) execFileSync('sleep', ['0.1']);
+      expect(sleepers(marker)).toHaveLength(1);
+      leader = Number(fs.readFileSync(path.join(dir, 'functions.pid'), 'utf8').split('\n')[0]);
+      const record = fs.readFileSync(path.join(dir, 'functions.pid'), 'utf8');
+
+      fs.chmodSync(dir, 0o555); // .members.tmp cannot be created
+      const r = spawnSync('bash', [STACK_BODY, '--fn', 'stop_previous'], {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: { ...process.env, STACK_STATE_DIR: dir },
+      });
+      fs.chmodSync(dir, 0o755);
+
+      // fail() reports and exits: nothing after step 1 runs.
+      expect(r.stdout).toContain('STACK FAILED: stop the previous functions serve');
+      expect(isAlive(leader)).toBe(true);
+      expect(sleepers(marker)).toHaveLength(1);
+      expect(fs.readFileSync(path.join(dir, 'functions.pid'), 'utf8')).toBe(record);
     } finally {
       fs.chmodSync(dir, 0o755);
       if (leader) {

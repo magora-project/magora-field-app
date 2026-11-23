@@ -47,7 +47,8 @@ cd "${root}" || { echo "STACK FAILED: cd to repo root"; exit 0; }
 SELF="${root}/scripts/lib/stack-body.sh"
 BOUNDED=(node "${root}/scripts/lib/bounded.mjs")
 # STACK_STATE_DIR is for tests/unit/supervision.test.ts only: it runs
-# `--fn stop_recorded` against a temporary state directory.
+# `--fn stop_recorded` and `--fn stop_previous` against a temporary state
+# directory.
 STATE="${STACK_STATE_DIR:-${root}/.stack}"
 LOG="${STATE}/session-start.log"
 # Surviving members of a dead recorded leader's group, for the port-8787 failure.
@@ -152,9 +153,20 @@ stop_recorded() {
   local name="$1"
   finish_interrupted_stop "${name}"
   [ -f "${STATE}/${name}.pid" ] || return 0
-  # A non-zero return means nothing was signalled: keep the record for a retry.
-  stop_recorded_leader "$@" || return 0
+  # A non-zero return means nothing was signalled: keep the record for a retry,
+  # and pass the failure on (see stop_previous).
+  stop_recorded_leader "$@" || return 1
   rm -f "${STATE}/${name}.pid" "${STATE}/${name}.members"
+}
+
+# stop_previous: step 1. A stop that fails ends the run before anything new
+# starts, because the replacement's PID file would overwrite the kept record
+# and leave the old process untracked.
+stop_previous() {
+  stop_recorded fake "scripts/fakes/server.mjs" \
+    || fail "stop the previous fake server (its record is kept; see the log)"
+  stop_recorded functions "functions serve" \
+    || fail "stop the previous functions serve (its record is kept; see the log)"
 }
 
 # record_members <name> <leader pid>: writes .stack/<name>.members, one
@@ -392,8 +404,7 @@ EOF
 
 # ── 1. Stop what a previous run started ─────────────────────────────────────
 step "stop previous processes"
-stop_recorded fake "scripts/fakes/server.mjs"
-stop_recorded functions "functions serve"
+stop_previous
 
 # ── 2. Docker, CLI, portal sources, supabase start ──────────────────────────
 start_docker
