@@ -1,0 +1,21 @@
+node_modules/
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+coverage/
+.env.local
+.env*.local
+ios/
+android/
+*.tsbuildinfo
+.metro-health-check*
+npm-debug.*
+.DS_Store
+
+# Local stack (scripts/cloud-session-start.sh, scripts/fetch-portal.sh)
+.stack/
+.portal/
+supabase/functions/
+supabase/.temp/
+supabase/.branches/

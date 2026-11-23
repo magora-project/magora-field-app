@@ -1,0 +1,93 @@
+# Local Supabase stack for the field app (spec §4.2). Only ever run locally, in a
+# cloud session or in CI, by scripts/cloud-session-start.sh. Keys omitted here take
+# the Supabase CLI's defaults (CLI pinned to 2.118.0 in scripts/cloud-setup.sh).
+#
+# The schema is NOT applied from supabase/migrations: the session script applies
+# the pinned portal migrations, or supabase/contract-schema.sql until the portal's
+# baseline lands, and then supabase/seed.sql. So db.seed is off here.
+project_id = "magora-field-app"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.seed]
+enabled = false
+
+[realtime]
+enabled = true
+
+[studio]
+enabled = false
+
+# Mailpit: Auth's one-time codes land here (http://127.0.0.1:54324), and the
+# contract tests read them from its API (declared deviation D1).
+[local_smtp]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+[storage.s3_protocol]
+enabled = false
+
+[storage.vector]
+enabled = false
+
+[storage.image_transformation]
+enabled = false
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:8081"
+additional_redirect_urls = ["http://localhost:8081"]
+jwt_expiry = 3600
+enable_signup = true
+enable_anonymous_sign_ins = false
+
+# The contract suites sign users in by email code many times an hour.
+[auth.rate_limit]
+email_sent = 1000
+sign_in_sign_ups = 1000
+token_verifications = 1000
+
+[auth.email]
+enable_signup = true
+enable_confirmations = false
+max_frequency = "1s"
+otp_length = 6
+otp_expiry = 3600
+
+# The sign-in email must carry the one-time code (AuthModal.jsx asks for it); the
+# CLI's default templates carry only a link. magic_link: existing users;
+# confirmation: first sign-in of a new email.
+[auth.email.template.magic_link]
+subject = "Your Magora sign-in code"
+content_path = "./supabase/templates/otp.html"
+
+[auth.email.template.confirmation]
+subject = "Your Magora sign-in code"
+content_path = "./supabase/templates/otp.html"
+
+[edge_runtime]
+enabled = true
+policy = "per_worker"
+deno_version = 2
+
+[analytics]
+enabled = false
+
+# Same as magora-portal's config.toml at the pin: the function validates the
+# caller's JWT itself (auth.getUser), so the gateway check is off.
+[functions.storage-upload]
+verify_jwt = false
