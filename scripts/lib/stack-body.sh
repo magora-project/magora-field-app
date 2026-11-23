@@ -50,6 +50,8 @@ BOUNDED=(node "${root}/scripts/lib/bounded.mjs")
 # `--fn stop_recorded` against a temporary state directory.
 STATE="${STACK_STATE_DIR:-${root}/.stack}"
 LOG="${STATE}/session-start.log"
+# Surviving members of a dead recorded leader's group, for the port-8787 failure.
+LEFTOVER=""
 
 note() { printf '[%3ss] %s\n' "${SECONDS}" "$*" >> "${LOG}"; }
 
@@ -109,6 +111,10 @@ wait_for() {
 # time and its command still match, checked immediately before each signal.
 start_time_of() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
 command_of() { ps -o command= -p "$1" 2>/dev/null; }
+# group_members <pgid>: PIDs in that process group, space-separated.
+group_members() {
+  ps -A -o pid=,pgid= 2>/dev/null | awk -v g="$1" '$2 == g { printf "%s%s", sep, $1; sep = " " }'
+}
 # signal_target <pid>: "-<pid>" (its whole process group) when the process leads
 # its own group, as spawn-daemon.mjs starts it, so helpers it spawned stop with
 # it; otherwise the PID alone.
@@ -145,7 +151,17 @@ stop_recorded() {
   rm -f "${pidfile}"
   [ -n "${pid}" ] || { note "not stopping ${name}: PID file has no PID"; return 0; }
   if [ -z "$(start_time_of "${pid}")" ]; then
-    note "${name} (PID ${pid}) is no longer running"
+    # The leader is gone, so a process still in group <pid> cannot be proven to
+    # be its descendant (the group ID may have been reused). Report it, never
+    # signal it.
+    local left
+    left="$(group_members "${pid}")"
+    if [ -n "${left}" ]; then
+      note "${name} (PID ${pid}) is no longer running, but process group ${pid} still has PIDs ${left}; not signalled: with the leader gone they cannot be proven to be its descendants. Stop them yourself if they are."
+      LEFTOVER="${LEFTOVER}${LEFTOVER:+; }${name} group ${pid}: PIDs ${left}"
+    else
+      note "${name} (PID ${pid}) is no longer running"
+    fi
     return 0
   fi
   if [ -z "${started}" ]; then
@@ -362,7 +378,7 @@ start_daemon functions supabase functions serve storage-upload || fail "start fu
 wait_for "functions serve (storage-upload)" 150 bash "${SELF}" --fn functions_ready
 
 step "fake server"
-port_free "${PORTAL_ORIGIN}/health" || fail "port 8787 is in use by a process this script did not record"
+port_free "${PORTAL_ORIGIN}/health" || fail "port 8787 is in use by a process this script did not record${LEFTOVER:+ (left over from a dead recorded service, not signalled: ${LEFTOVER})}"
 # The key reaches the fake through its environment, never its arguments.
 (
   export SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY="${SERVICE_ROLE_KEY}"

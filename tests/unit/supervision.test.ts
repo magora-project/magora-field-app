@@ -140,6 +140,45 @@ describe('stop_recorded (stack-body.sh)', () => {
       killSleepers(marker);
     }
   });
+
+  test('reports, and never signals, the group of a leader that is already gone', () => {
+    const marker = newMarker();
+    try {
+      // The leader exits after 1 s; its TERM-ignoring child stays in the group.
+      execFileSync('node', [
+        SPAWN_DAEMON,
+        path.join(dir, 'svc.pid'),
+        path.join(dir, 'svc.log'),
+        '--',
+        'bash',
+        '-c',
+        treeScript(marker, 'sleep 1'),
+      ]);
+      const leader = Number(fs.readFileSync(path.join(dir, 'svc.pid'), 'utf8').split('\n')[0]);
+      const end = Date.now() + 5000;
+      const alive = () => {
+        try {
+          process.kill(leader, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      while (alive() && Date.now() < end) execFileSync('sleep', ['0.1']);
+      expect(alive()).toBe(false);
+      const [child] = sleepers(marker);
+      expect(child).toBeGreaterThan(0);
+
+      const r = stopRecorded(marker);
+      expect(r.status).toBe(0);
+      expect(sleepers(marker)).toEqual([child]);
+      const log = fs.readFileSync(path.join(dir, 'session-start.log'), 'utf8');
+      expect(log).toContain(`process group ${leader} still has PIDs ${child}; not signalled`);
+      expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(false);
+    } finally {
+      killSleepers(marker);
+    }
+  });
 });
 
 describe('spawn-daemon.mjs', () => {
