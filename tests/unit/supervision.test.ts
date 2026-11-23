@@ -59,8 +59,9 @@ function killSleepers(marker: string) {
 
 /** A directory holding a `ps` wrapper, to put first on PATH. With
  * PS_FAIL=<text>, a `ps` call whose arguments contain <text> prints nothing and
- * exits 1; with PS_SLOW=<text>, it first sleeps 1 s. Other calls run the real
- * ps. */
+ * exits 1; with PS_SLOW=<text>, it first sleeps 1 s; with PS_SHIFT=<text>, its
+ * output has each line's trailing year replaced by 1999 (a different start
+ * time). Other calls run the real ps. */
 function psShim(dir: string): string {
   const realPs = execFileSync('sh', ['-c', 'command -v ps'], { encoding: 'utf8' }).trim();
   const bin = path.join(dir, 'shim-bin');
@@ -72,6 +73,7 @@ function psShim(dir: string): string {
       'case "$*" in',
       `  *"\${PS_FAIL:-@none@}"*) exit 1 ;;`,
       `  *"\${PS_SLOW:-@none@}"*) sleep 1 ;;`,
+      `  *"\${PS_SHIFT:-@none@}"*) '${realPs}' "$@" | sed 's/[0-9][0-9][0-9][0-9]\\( *\\)$/1999\\1/'; exit 0 ;;`,
       'esac',
       `exec '${realPs}' "$@"`,
       '',
@@ -322,6 +324,37 @@ describe('stop_recorded (stack-body.sh)', () => {
       expect(isAlive(leader)).toBe(true);
       expect(sleepers(marker)).toHaveLength(1);
       expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(true);
+    } finally {
+      killGroup(leader);
+      killSleepers(marker);
+    }
+  });
+
+  test('signals nothing when the member snapshot does not show the recorded leader', () => {
+    const marker = newMarker();
+    let leader = 0;
+    try {
+      startRecorded(marker);
+      leader = Number(fs.readFileSync(path.join(dir, 'svc.pid'), 'utf8').split('\n')[0]);
+      // Only the group read (`-A ... lstart=`) is altered: the identity check
+      // before it passes, as when the group empties and its ID is reused
+      // between that check and the read.
+      const bin = psShim(dir);
+      const r = spawnSync('bash', [STACK_BODY, '--fn', 'stop_recorded', 'svc', `sleep ${marker}`], {
+        stdio: 'ignore',
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          STACK_STATE_DIR: dir,
+          PATH: `${bin}:${process.env.PATH}`,
+          PS_SHIFT: 'pid=,pgid=,lstart=',
+        },
+      });
+      expect(r.status).toBe(1);
+      expect(isAlive(leader)).toBe(true);
+      expect(sleepers(marker)).toHaveLength(1);
+      expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'svc.members'))).toBe(false);
     } finally {
       killGroup(leader);
       killSleepers(marker);

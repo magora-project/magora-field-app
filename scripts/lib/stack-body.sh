@@ -180,18 +180,22 @@ stop_previous() {
     || fail "stop the previous functions serve (its record is kept; see the log)"
 }
 
-# record_members <name> <leader pid>: writes .stack/<name>.members, one
-# "<pid> <start time>" line per member of the leader's process group. Called
-# only while the leader is verified alive, so no unrelated process can be in
-# its group. Each row's PID, group and start time come from one `ps` read of
-# that process, so a member that exits and whose PID is reused cannot have the
-# new process's start time recorded against it.
-# Returns non-zero, with no members file, if the list cannot be read or saved.
+# record_members <name> <leader pid> <leader start time>: writes
+# .stack/<name>.members, one "<pid> <start time>" line per member of the
+# leader's process group, from one `ps -A` read. The read must itself show the
+# leader with its recorded start time: a group ID is not reused while any
+# member is alive, so with the leader alive in the same read, every row is the
+# original group's. (Checking the leader only beforehand would not do: the
+# group could empty and its ID be reused before the read.) Each row's PID,
+# group and start time come from that one read, so a member whose PID is
+# reused later cannot have the new process's start time recorded against it.
+# Returns non-zero, with no members file, if the list cannot be read or saved,
+# or does not show the leader.
 record_members() {
   if LC_ALL=C ps -A -o pid=,pgid=,lstart= 2>/dev/null \
     | awk -v g="$2" '$2 == g { pid = $1; $1 = ""; $2 = ""; sub(/^ +/, ""); print pid, $0 }' \
       > "${STATE}/$1.members.tmp" \
-    && [ -s "${STATE}/$1.members.tmp" ] \
+    && grep -qxF -- "$2 $3" "${STATE}/$1.members.tmp" \
     && mv -f "${STATE}/$1.members.tmp" "${STATE}/$1.members"; then
     return 0
   fi
@@ -277,8 +281,8 @@ stop_recorded_leader() {
   target="$(signal_target "${pid}")"
   # Without a saved member list an interrupted stop could not be finished
   # later, so nothing is signalled until the list is saved.
-  if ! record_members "${name}" "${pid}"; then
-    note "not stopping ${name} (PID ${pid}): cannot save its group members to ${STATE}/${name}.members; its record is kept for the next run"
+  if ! record_members "${name}" "${pid}" "${started}"; then
+    note "not stopping ${name} (PID ${pid}): cannot save its group members, with the leader still as recorded, to ${STATE}/${name}.members; its record is kept for the next run"
     return 1
   fi
   kill -TERM -- "${target}" 2>/dev/null
