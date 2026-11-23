@@ -46,7 +46,9 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${root}" || { echo "STACK FAILED: cd to repo root"; exit 0; }
 SELF="${root}/scripts/lib/stack-body.sh"
 BOUNDED=(node "${root}/scripts/lib/bounded.mjs")
-STATE="${root}/.stack"
+# STACK_STATE_DIR is for tests/unit/supervision.test.ts only: it runs
+# `--fn stop_recorded` against a temporary state directory.
+STATE="${STACK_STATE_DIR:-${root}/.stack}"
 LOG="${STATE}/session-start.log"
 
 note() { printf '[%3ss] %s\n' "${SECONDS}" "$*" >> "${LOG}"; }
