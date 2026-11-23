@@ -143,12 +143,65 @@ is_recorded() {
 # signal: if the process exited and its PID was reused inside that window, the
 # signal would reach the new process. It is microseconds long and inherent to
 # signalling by PID; macOS has no pidfd to close it.
+#
+# The PID file, and the members file written before the first signal, are
+# removed only once the stop has finished. If the stop is interrupted (the
+# deadline, or an outside signal), the next run finishes it first: see
+# finish_interrupted_stop.
 stop_recorded() {
+  local name="$1"
+  finish_interrupted_stop "${name}"
+  [ -f "${STATE}/${name}.pid" ] || return 0
+  stop_recorded_leader "$@"
+  rm -f "${STATE}/${name}.pid" "${STATE}/${name}.members"
+}
+
+# record_members <name> <leader pid>: writes .stack/<name>.members, one
+# "<pid> <start time>" line per member of the leader's process group. Called
+# only while the leader is verified alive, so the group ID is the leader's and
+# every member listed is its group's; each is pinned by its own start time.
+record_members() {
+  local m t
+  : > "${STATE}/$1.members.tmp"
+  for m in $(group_members "$2"); do
+    t="$(start_time_of "${m}")"
+    [ -n "${t}" ] && printf '%s %s\n' "${m}" "${t}" >> "${STATE}/$1.members.tmp"
+  done
+  mv -f "${STATE}/$1.members.tmp" "${STATE}/$1.members"
+}
+
+# finish_interrupted_stop <name>: a members file left by a stop that never
+# finished. SIGKILLs each listed PID whose start time still matches (it was
+# already sent SIGTERM), waits up to 2 s for them to go, then removes the file.
+finish_interrupted_stop() {
+  local name="$1" members="${STATE}/$1.members" m t left i
+  [ -f "${members}" ] || return 0
+  note "finishing an interrupted stop of ${name}"
+  while read -r m t; do
+    [ -n "${m}" ] && [ -n "${t}" ] || continue
+    if [ "$(start_time_of "${m}")" = "${t}" ]; then
+      note "${name}: PID ${m} (started ${t}) survived an interrupted stop; sending SIGKILL"
+      kill -KILL "${m}" 2>/dev/null
+    fi
+  done < "${members}"
+  for ((i = 0; i < 20; i++)); do
+    left=""
+    while read -r m t; do
+      [ -n "${m}" ] && [ "$(start_time_of "${m}")" = "${t}" ] && left="${left} ${m}"
+    done < "${members}"
+    [ -z "${left}" ] && break
+    sleep 0.1
+  done
+  [ -n "${left}" ] && note "${name}: PIDs${left} still present after SIGKILL"
+  rm -f "${members}"
+}
+
+# stop_recorded_leader <name> <expected command fragment>: the stop itself,
+# from .stack/<name>.pid. Leaves both files for stop_recorded to remove.
+stop_recorded_leader() {
   local name="$1" expect="$2" pidfile="${STATE}/$1.pid" pid started i
-  [ -f "${pidfile}" ] || return 0
   pid="$(sed -n 1p "${pidfile}" | tr -cd '0-9')"
   started="$(sed -n 2p "${pidfile}")"
-  rm -f "${pidfile}"
   [ -n "${pid}" ] || { note "not stopping ${name}: PID file has no PID"; return 0; }
   if [ -z "$(start_time_of "${pid}")" ]; then
     # The leader is gone, so a process still in group <pid> cannot be proven to
@@ -181,6 +234,7 @@ stop_recorded() {
   # probe that found it populated.
   local target
   target="$(signal_target "${pid}")"
+  record_members "${name}" "${pid}"
   kill -TERM -- "${target}" 2>/dev/null
   for ((i = 0; i < 20; i++)); do
     sleep 0.5

@@ -4,7 +4,7 @@
 // Process supervision in the stack scripts (plan Task 4). Each test starts only
 // its own `sleep <marker>` processes, with a random marker, and kills whatever
 // is left of them by PID afterwards. Needs bash, node, ps and pgrep; no stack.
-import { execFileSync, spawnSync } from 'child_process';
+import { execFileSync, spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -175,6 +175,41 @@ describe('stop_recorded (stack-body.sh)', () => {
       const log = fs.readFileSync(path.join(dir, 'session-start.log'), 'utf8');
       expect(log).toContain(`process group ${leader} still has PIDs ${child}; not signalled`);
       expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(false);
+    } finally {
+      killSleepers(marker);
+    }
+  });
+
+  test('a stop interrupted during its grace is finished by the next run', async () => {
+    const marker = newMarker();
+    try {
+      startRecorded(marker);
+      const [child] = sleepers(marker);
+      const log = path.join(dir, 'session-start.log');
+      // Interrupt the stop inside its 10 s grace, after the SIGTERM.
+      const first = spawn('bash', [STACK_BODY, '--fn', 'stop_recorded', 'svc', `sleep ${marker}`], {
+        stdio: 'ignore',
+        env: { ...process.env, STACK_STATE_DIR: dir },
+      });
+      const exited = new Promise((resolve) => first.on('exit', resolve));
+      const end = Date.now() + 5000;
+      while (!(fs.existsSync(log) && fs.readFileSync(log, 'utf8').includes('stopping svc')) && Date.now() < end) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+      first.kill('SIGKILL');
+      await exited;
+
+      // The record survives the interruption, and the child is still running.
+      expect(sleepers(marker)).toEqual([child]);
+      expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'svc.members'), 'utf8')).toContain(`${child} `);
+
+      const r = stopRecorded(marker);
+      expect(r.status).toBe(0);
+      expect(sleepersAfter(marker)).toEqual([]);
+      expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'svc.members'))).toBe(false);
     } finally {
       killSleepers(marker);
     }
