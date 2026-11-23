@@ -14,7 +14,8 @@
 // while the child is still this process's unreaped child, so the PID cannot
 // have been reused. The file is written to <pidfile>.tmp and renamed.
 //
-// Exits 0 once the PID file is written. Exits non-zero, with no PID file, if
+// Exits 0 once the PID file is written; 128 + the signal number instead if a
+// TERM, INT or HUP arrived while starting (held until then). Exits non-zero, with no PID file, if
 // the command could not be started, its start time could not be read, or the
 // PID file could not be written; in the last two cases the started command's
 // process group is SIGKILLed first, so nothing is left running unrecorded.
@@ -30,6 +31,21 @@ if (argv[2] !== '--' || argv.length < 4) {
 const [pidfile, logfile] = argv;
 const [cmd, ...args] = argv.slice(3);
 const say = (msg) => process.stderr.write(`spawn-daemon.mjs: ${msg}\n`);
+
+// From the spawn until the PID file is written, a TERM, INT or HUP (a deadline
+// in bounded.mjs, or an outside stop) is held, not acted on: dying in between
+// would leave the service running with no record. It is acted on once the
+// record is written. The `ps` read below is bounded well inside bounded.mjs's
+// 5 s grace, so the record is written before a SIGKILL could come. SIGKILL
+// itself cannot be held: an outside SIGKILL inside this window is the one
+// case that leaves the service unrecorded.
+let heldSignal = null;
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  process.on(sig, () => {
+    heldSignal ??= sig;
+  });
+}
+const PS_TIMEOUT_MS = 3000;
 
 const out = openSync(logfile, 'w');
 const child = spawn(cmd, args, { detached: true, stdio: ['ignore', out, out] });
@@ -48,6 +64,7 @@ if (child.pid !== undefined) {
     started = execFileSync('ps', ['-o', 'lstart=', '-p', String(child.pid)], {
       env: { ...process.env, LC_ALL: 'C' },
       encoding: 'utf8',
+      timeout: PS_TIMEOUT_MS,
     })
       .replace(/\s+/g, ' ')
       .trim();
@@ -79,5 +96,15 @@ if (child.pid !== undefined) {
     stopUnrecorded(`cannot write ${pidfile}: ${err.message}`);
   }
   child.unref();
-  process.exit(0);
+  // The service is recorded, so the next run can stop it. Signal handlers run
+  // from the event loop, which the synchronous code above never reached, so
+  // let one turn of it deliver any pending signal, then act on a held one by
+  // exiting as it would have (128 + signal number).
+  setImmediate(() => {
+    if (heldSignal) {
+      say(`${heldSignal} received while starting; ${cmd} is recorded in ${pidfile}`);
+      process.exit({ SIGHUP: 129, SIGINT: 130, SIGTERM: 143 }[heldSignal]);
+    }
+    process.exit(0);
+  });
 }

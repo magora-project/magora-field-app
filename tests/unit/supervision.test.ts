@@ -57,6 +57,30 @@ function killSleepers(marker: string) {
   }
 }
 
+/** A directory holding a `ps` wrapper, to put first on PATH. With
+ * PS_FAIL=<text>, a `ps` call whose arguments contain <text> prints nothing and
+ * exits 1; with PS_SLOW=<text>, it first sleeps 1 s. Other calls run the real
+ * ps. */
+function psShim(dir: string): string {
+  const realPs = execFileSync('sh', ['-c', 'command -v ps'], { encoding: 'utf8' }).trim();
+  const bin = path.join(dir, 'shim-bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    path.join(bin, 'ps'),
+    [
+      '#!/bin/sh',
+      'case "$*" in',
+      `  *"\${PS_FAIL:-@none@}"*) exit 1 ;;`,
+      `  *"\${PS_SLOW:-@none@}"*) sleep 1 ;;`,
+      'esac',
+      `exec '${realPs}' "$@"`,
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  return bin;
+}
+
 // A leader that exits on SIGTERM, with a child that ignores SIGTERM. The
 // `sleep <marker>` process exists only after the trap is set, since it is
 // exec'd from the trapped subshell.
@@ -270,6 +294,77 @@ describe('stop_recorded (stack-body.sh)', () => {
     }
   });
 
+  const killGroup = (leader: number) => {
+    if (!leader) return;
+    try {
+      process.kill(-leader, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  };
+
+  test.each([
+    ['start time', 'lstart='],
+    ['command', 'command='],
+  ])('signals nothing, and keeps the record, when a live process\'s %s cannot be read', (_what, psArg) => {
+    const marker = newMarker();
+    let leader = 0;
+    try {
+      startRecorded(marker);
+      leader = Number(fs.readFileSync(path.join(dir, 'svc.pid'), 'utf8').split('\n')[0]);
+      const bin = psShim(dir);
+      const r = spawnSync('bash', [STACK_BODY, '--fn', 'stop_recorded', 'svc', `sleep ${marker}`], {
+        stdio: 'ignore',
+        timeout: 30_000,
+        env: { ...process.env, STACK_STATE_DIR: dir, PATH: `${bin}:${process.env.PATH}`, PS_FAIL: psArg },
+      });
+      expect(r.status).toBe(1);
+      expect(isAlive(leader)).toBe(true);
+      expect(sleepers(marker)).toHaveLength(1);
+      expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(true);
+    } finally {
+      killGroup(leader);
+      killSleepers(marker);
+    }
+  });
+
+  test('keeps the record, and fails, when the group survives SIGKILL', () => {
+    const marker = newMarker();
+    let leader = 0;
+    try {
+      // A leader that ignores TERM, and a `kill` that cannot SIGKILL (a bash
+      // function overrides the builtin), so the group outlives the stop.
+      execFileSync('node', [
+        SPAWN_DAEMON,
+        path.join(dir, 'svc.pid'),
+        path.join(dir, 'svc.log'),
+        '--',
+        'bash',
+        '-c',
+        `trap '' TERM; (exec sleep ${marker}) & wait`,
+      ]);
+      const end = Date.now() + 3000;
+      while (!sleepers(marker).length && Date.now() < end) execFileSync('sleep', ['0.1']);
+      leader = Number(fs.readFileSync(path.join(dir, 'svc.pid'), 'utf8').split('\n')[0]);
+      const r = spawnSync('bash', [STACK_BODY, '--fn', 'stop_recorded', 'svc', `sleep ${marker}`], {
+        stdio: 'ignore',
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          STACK_STATE_DIR: dir,
+          'BASH_FUNC_kill%%': '() { [ "$1" = -KILL ] && return 0; builtin kill "$@"; }',
+        },
+      });
+      expect(r.status).toBe(1);
+      expect(isAlive(leader)).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'session-start.log'), 'utf8')).toContain('still present after SIGKILL');
+    } finally {
+      killGroup(leader);
+      killSleepers(marker);
+    }
+  });
+
   test('ends startup, before starting anything, when a previous service cannot be stopped', () => {
     const marker = newMarker();
     let leader = 0;
@@ -320,6 +415,43 @@ describe('stop_recorded (stack-body.sh)', () => {
 });
 
 describe('spawn-daemon.mjs', () => {
+  test('a TERM while starting is held until the service is recorded', async () => {
+    const marker = newMarker();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'supervision-'));
+    const pidfile = path.join(dir, 'svc.pid');
+    let leader = 0;
+    try {
+      // A slow start-time read keeps spawn-daemon between the spawn and the
+      // record for 1 s; the TERM lands inside that window.
+      const bin = psShim(dir);
+      const daemon = spawn('node', [SPAWN_DAEMON, pidfile, path.join(dir, 'svc.log'), '--', 'sleep', marker], {
+        stdio: 'ignore',
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PS_SLOW: 'lstart=' },
+      });
+      const exited = new Promise<number | null>((resolve) => daemon.on('exit', (code) => resolve(code)));
+      const end = Date.now() + 3000;
+      while (!sleepers(marker).length && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+      expect(sleepers(marker)).toHaveLength(1);
+      expect(fs.existsSync(pidfile)).toBe(false);
+      daemon.kill('SIGTERM');
+      expect(await exited).toBe(143);
+
+      const [pid] = fs.readFileSync(pidfile, 'utf8').split('\n');
+      leader = Number(pid);
+      expect(sleepers(marker)).toEqual([leader]);
+    } finally {
+      if (leader) {
+        try {
+          process.kill(-leader, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+      killSleepers(marker);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('stops the service when its PID file cannot be written', () => {
     const marker = newMarker();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'supervision-'));

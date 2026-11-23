@@ -125,12 +125,23 @@ signal_target() {
   if [ "${pgid}" = "$1" ]; then printf -- '-%s' "$1"; else printf '%s' "$1"; fi
 }
 
-# is_recorded <pid> <start time> <expected command fragment>
+# is_recorded <pid> <start time> <expected command fragment>: 0 if <pid> is
+# still the recorded process; 1 if it is not (gone, or its start time or
+# command differs); 2 if that cannot be told, because a `ps` read came back
+# empty while the PID is alive. Callers keep the record on 2.
 is_recorded() {
   local now cmd
   now="$(start_time_of "$1")"
-  [ -n "${now}" ] && [ "${now}" = "$2" ] || return 1
+  if [ -z "${now}" ]; then
+    kill -0 "$1" 2>/dev/null && return 2
+    return 1
+  fi
+  [ "${now}" = "$2" ] || return 1
   cmd="$(command_of "$1")"
+  if [ -z "${cmd}" ]; then
+    kill -0 "$1" 2>/dev/null && return 2
+    return 1
+  fi
   case "${cmd}" in *"$3"*) return 0 ;; *) return 1 ;; esac
 }
 
@@ -222,6 +233,10 @@ stop_recorded_leader() {
   started="$(sed -n 2p "${pidfile}")"
   [ -n "${pid}" ] || { note "not stopping ${name}: PID file has no PID"; return 0; }
   if [ -z "$(start_time_of "${pid}")" ]; then
+    if kill -0 "${pid}" 2>/dev/null; then
+      note "not stopping ${name} (PID ${pid}): it is running but its start time cannot be read; its record is kept for the next run"
+      return 1
+    fi
     # The leader is gone, so a process still in group <pid> cannot be proven to
     # be its descendant (the group ID may have been reused). Report it, never
     # signal it.
@@ -239,10 +254,18 @@ stop_recorded_leader() {
     note "not stopping PID ${pid}: no recorded start time, so its identity is unresolved"
     return 0
   fi
-  if ! is_recorded "${pid}" "${started}" "${expect}"; then
-    note "not stopping PID ${pid}: start time or command differs from the recorded ${name} (PID reused)"
-    return 0
-  fi
+  is_recorded "${pid}" "${started}" "${expect}"
+  case $? in
+    0) ;;
+    1)
+      note "not stopping PID ${pid}: start time or command differs from the recorded ${name} (PID reused)"
+      return 0
+      ;;
+    *)
+      note "not stopping ${name} (PID ${pid}): its identity cannot be read; its record is kept for the next run"
+      return 1
+      ;;
+  esac
   note "stopping ${name} (PID ${pid}, started ${started})"
   # The target is fixed here, while the identity check above still holds. For a
   # group leader it is the whole group ("-<pid>"), and the group is supervised
@@ -271,8 +294,8 @@ stop_recorded_leader() {
     target_alive "${target}" "${pid}" "${started}" "${expect}" || return 0
     sleep 0.1
   done
-  note "${name} (PID ${pid}) still present after SIGKILL"
-  return 0
+  note "${name} (PID ${pid}) still present after SIGKILL; its record is kept for the next run"
+  return 1
 }
 
 # target_alive <target> <pid> <start time> <command fragment>: for a group target
@@ -281,7 +304,11 @@ stop_recorded_leader() {
 target_alive() {
   case "$1" in
     -*) kill -0 -- "$1" 2>/dev/null ;;
-    *) is_recorded "$2" "$3" "$4" ;;
+    # Unreadable (2) counts as alive: the stop then ends keeping the record.
+    *)
+      is_recorded "$2" "$3" "$4"
+      [ $? -ne 1 ]
+      ;;
   esac
 }
 
