@@ -152,7 +152,8 @@ stop_recorded() {
   local name="$1"
   finish_interrupted_stop "${name}"
   [ -f "${STATE}/${name}.pid" ] || return 0
-  stop_recorded_leader "$@"
+  # A non-zero return means nothing was signalled: keep the record for a retry.
+  stop_recorded_leader "$@" || return 0
   rm -f "${STATE}/${name}.pid" "${STATE}/${name}.members"
 }
 
@@ -162,11 +163,17 @@ stop_recorded() {
 # its group. Each row's PID, group and start time come from one `ps` read of
 # that process, so a member that exits and whose PID is reused cannot have the
 # new process's start time recorded against it.
+# Returns non-zero, with no members file, if the list cannot be read or saved.
 record_members() {
-  LC_ALL=C ps -A -o pid=,pgid=,lstart= 2>/dev/null \
+  if LC_ALL=C ps -A -o pid=,pgid=,lstart= 2>/dev/null \
     | awk -v g="$2" '$2 == g { pid = $1; $1 = ""; $2 = ""; sub(/^ +/, ""); print pid, $0 }' \
-    > "${STATE}/$1.members.tmp"
-  mv -f "${STATE}/$1.members.tmp" "${STATE}/$1.members"
+      > "${STATE}/$1.members.tmp" \
+    && [ -s "${STATE}/$1.members.tmp" ] \
+    && mv -f "${STATE}/$1.members.tmp" "${STATE}/$1.members"; then
+    return 0
+  fi
+  rm -f "${STATE}/$1.members.tmp"
+  return 1
 }
 
 # finish_interrupted_stop <name>: a members file left by a stop that never
@@ -233,7 +240,12 @@ stop_recorded_leader() {
   # probe that found it populated.
   local target
   target="$(signal_target "${pid}")"
-  record_members "${name}" "${pid}"
+  # Without a saved member list an interrupted stop could not be finished
+  # later, so nothing is signalled until the list is saved.
+  if ! record_members "${name}" "${pid}"; then
+    note "not stopping ${name} (PID ${pid}): cannot save its group members to ${STATE}/${name}.members; its record is kept for the next run"
+    return 1
+  fi
   kill -TERM -- "${target}" 2>/dev/null
   for ((i = 0; i < 20; i++)); do
     sleep 0.5

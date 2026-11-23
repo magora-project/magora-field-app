@@ -18,11 +18,23 @@ jest.setTimeout(40_000);
 
 const newMarker = () => String(700000 + Math.floor(Math.random() * 200000));
 
-/** PIDs of running `sleep <marker>` processes. */
+/** PIDs of running `sleep <marker>` processes. Throws if pgrep itself fails, so
+ * a broken probe never reads as "no process left". */
 function sleepers(marker: string): number[] {
   const r = spawnSync('pgrep', ['-f', `^sleep ${marker}$`], { encoding: 'utf8' });
-  return r.status === 0 ? r.stdout.trim().split('\n').map(Number) : [];
+  if (r.status === 0) return r.stdout.trim().split('\n').map(Number);
+  if (r.status === 1) return [];
+  throw new Error(`pgrep failed (status ${r.status}): ${r.stderr || r.error}`);
 }
+
+const isAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /** Polls briefly, since an orphan killed just now may not be reaped yet. */
 function sleepersAfter(marker: string, ms = 1500): number[] {
@@ -192,11 +204,15 @@ describe('stop_recorded (stack-body.sh)', () => {
         env: { ...process.env, STACK_STATE_DIR: dir },
       });
       const exited = new Promise((resolve) => first.on('exit', resolve));
+      const leader = Number(fs.readFileSync(path.join(dir, 'svc.pid'), 'utf8').split('\n')[0]);
       const end = Date.now() + 5000;
       while (!(fs.existsSync(log) && fs.readFileSync(log, 'utf8').includes('stopping svc')) && Date.now() < end) {
         await new Promise((r) => setTimeout(r, 100));
       }
-      await new Promise((r) => setTimeout(r, 1500));
+      // The leader exits on SIGTERM: once it is gone, TERM has been sent and the
+      // stop is inside its grace.
+      while (isAlive(leader) && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+      expect(isAlive(leader)).toBe(false);
       first.kill('SIGKILL');
       await exited;
 
@@ -211,6 +227,33 @@ describe('stop_recorded (stack-body.sh)', () => {
       expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(false);
       expect(fs.existsSync(path.join(dir, 'svc.members'))).toBe(false);
     } finally {
+      killSleepers(marker);
+    }
+  });
+
+  test('signals nothing, and keeps the record, when the member list cannot be saved', () => {
+    const marker = newMarker();
+    let leader = 0;
+    try {
+      startRecorded(marker);
+      leader = Number(fs.readFileSync(path.join(dir, 'svc.pid'), 'utf8').split('\n')[0]);
+      fs.chmodSync(dir, 0o555); // .members.tmp cannot be created
+      const r = stopRecorded(marker);
+      fs.chmodSync(dir, 0o755);
+      expect(r.status).toBe(0);
+      expect(isAlive(leader)).toBe(true);
+      expect(sleepers(marker)).toHaveLength(1);
+      expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'svc.members'))).toBe(false);
+    } finally {
+      fs.chmodSync(dir, 0o755);
+      if (leader) {
+        try {
+          process.kill(-leader, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
       killSleepers(marker);
     }
   });

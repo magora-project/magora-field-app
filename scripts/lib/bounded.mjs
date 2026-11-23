@@ -56,15 +56,20 @@ const child = spawn(cmd, args, {
 
 const unreaped = () => child.exitCode === null && child.signalCode === null;
 
-// True while the child's process group still has a member (signal 0 probe).
+// True while the child's process group may still have a member (signal 0
+// probe). Only ESRCH proves the group empty; any other error (EPERM: a member
+// under another user) leaves it possibly populated.
+let probeErrorSaid = false;
 function groupAlive() {
   if (child.pid === undefined) return false;
   try {
     process.kill(-child.pid, 0);
     return true;
   } catch (err) {
-    if (err.code !== 'ESRCH') say(`kill(-${child.pid}, 0): ${err.message}`);
-    return false;
+    if (err.code === 'ESRCH') return false;
+    if (!probeErrorSaid) say(`kill(-${child.pid}, 0): ${err.message}; treating the group as still populated`);
+    probeErrorSaid = true;
+    return true;
   }
 }
 
@@ -109,6 +114,7 @@ function stop(status, why) {
         if (!unreaped() || Date.now() >= reapEnd) {
           clearInterval(reap);
           if (unreaped()) say(`process ${child.pid} not reaped ${REAP_WAIT_MS / 1000} s after SIGKILL; exiting without it`);
+          if (groupAlive()) say(`process group ${child.pid} may still have members after SIGKILL; cleanup unconfirmed`);
           finish(status);
         }
       }, 100);

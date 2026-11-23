@@ -46,9 +46,14 @@ function assertLocal() {
   }
 }
 
+// Each request, body read included, is aborted after this long, so a stalled
+// Supabase response cannot hold `draining` for undici's 300 s defaults.
+const REQUEST_TIMEOUT_MS = 15_000;
+
 async function rest(path, init = {}) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     ...init,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     headers: {
       apikey: SERVICE_KEY,
       Authorization: `Bearer ${SERVICE_KEY}`,

@@ -194,7 +194,8 @@ export async function pollUntil<T>(
   const deadline = Date.now() + timeoutMs;
   let value = await read();
   while (!done(value) && Date.now() < deadline) {
-    await sleep(everyMs);
+    await sleep(Math.min(everyMs, Math.max(0, deadline - Date.now())));
+    if (Date.now() >= deadline) break;
     value = await read();
   }
   return value;
