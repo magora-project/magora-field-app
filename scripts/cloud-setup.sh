@@ -87,4 +87,14 @@ npm ci
 say "fetching magora-portal at $(tr -d '[:space:]' < portal-pin.txt)"
 bash scripts/fetch-portal.sh .portal
 check_baseline_rule
+# This runs as root; the session that later starts the stack may not. Give
+# what it created to the checkout's owner, so a later portal re-fetch or
+# install can replace it.
+if [ "$(id -u)" -eq 0 ]; then
+  owner="$(stat -c '%u:%g' . 2>/dev/null || stat -f '%u:%g' .)"
+  if [ "${owner}" != "0:0" ]; then
+    chown -R "${owner}" .portal node_modules \
+      || say "warning: could not hand .portal and node_modules to ${owner}" >&2
+  fi
+fi
 say "done"

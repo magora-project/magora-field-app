@@ -162,7 +162,7 @@ is_recorded() {
 # finish_interrupted_stop.
 stop_recorded() {
   local name="$1"
-  finish_interrupted_stop "${name}"
+  finish_interrupted_stop "${name}" || return 1
   [ -f "${STATE}/${name}.pid" ] || return 0
   # A non-zero return means nothing was signalled: keep the record for a retry,
   # and pass the failure on (see stop_previous).
@@ -203,29 +203,54 @@ record_members() {
   return 1
 }
 
+# member_is <pid> <start time>: 0 if <pid> is still the process started then;
+# 1 if not (gone, or a different start time); 2 if that cannot be told,
+# because the start-time read came back empty while the PID is alive.
+member_is() {
+  local now
+  now="$(start_time_of "$1")"
+  if [ -z "${now}" ]; then
+    kill -0 "$1" 2>/dev/null && return 2
+    return 1
+  fi
+  [ "${now}" = "$2" ]
+}
+
 # finish_interrupted_stop <name>: a members file left by a stop that never
-# finished. SIGKILLs each listed PID whose start time still matches (it was
+# finished. SIGKILLs each listed PID that is still the listed process (it was
 # already sent SIGTERM), waits up to 2 s for them to go, then removes the file.
+# If a listed PID is still there, or cannot be told apart from a new process,
+# the file is kept and it returns 1, so the stop fails and startup ends.
 finish_interrupted_stop() {
-  local name="$1" members="${STATE}/$1.members" m t left i
+  local name="$1" members="${STATE}/$1.members" m t left unread i rc
   [ -f "${members}" ] || return 0
   note "finishing an interrupted stop of ${name}"
   while read -r m t; do
     [ -n "${m}" ] && [ -n "${t}" ] || continue
-    if [ "$(start_time_of "${m}")" = "${t}" ]; then
+    if member_is "${m}" "${t}"; then
       note "${name}: PID ${m} (started ${t}) survived an interrupted stop; sending SIGKILL"
       kill -KILL "${m}" 2>/dev/null
     fi
   done < "${members}"
   for ((i = 0; i < 20; i++)); do
     left=""
+    unread=""
     while read -r m t; do
-      [ -n "${m}" ] && [ "$(start_time_of "${m}")" = "${t}" ] && left="${left} ${m}"
+      [ -n "${m}" ] && [ -n "${t}" ] || continue
+      member_is "${m}" "${t}"
+      rc=$?
+      [ "${rc}" -eq 0 ] && left="${left} ${m}"
+      [ "${rc}" -eq 2 ] && unread="${unread} ${m}"
     done < "${members}"
-    [ -z "${left}" ] && break
+    [ -z "${left}${unread}" ] && break
     sleep 0.1
   done
-  [ -n "${left}" ] && note "${name}: PIDs${left} still present after SIGKILL"
+  if [ -n "${left}${unread}" ]; then
+    [ -n "${left}" ] && note "${name}: PIDs${left} still present after SIGKILL"
+    [ -n "${unread}" ] && note "${name}: PIDs${unread} are running but their start time cannot be read"
+    note "${name}: the interrupted stop is unfinished; ${members} is kept for the next run"
+    return 1
+  fi
   rm -f "${members}"
 }
 

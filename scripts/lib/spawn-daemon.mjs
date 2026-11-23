@@ -35,8 +35,10 @@ const say = (msg) => process.stderr.write(`spawn-daemon.mjs: ${msg}\n`);
 // From the spawn until the PID file is written, a TERM, INT or HUP (a deadline
 // in bounded.mjs, or an outside stop) is held, not acted on: dying in between
 // would leave the service running with no record. It is acted on once the
-// record is written. The `ps` read below is bounded well inside bounded.mjs's
-// 5 s grace, so the record is written before a SIGKILL could come. SIGKILL
+// record is written. The `ps` read below is bounded at 800 ms, inside the
+// grace bounded.mjs allows before its SIGKILL: 3 s at depth 1, where
+// start_daemon runs this, and never under 1 s at any depth. So the record (or
+// stopUnrecorded) comes before a SIGKILL could. SIGKILL
 // itself cannot be held: an outside SIGKILL inside this window is the one
 // case that leaves the service unrecorded.
 let heldSignal = null;
@@ -45,7 +47,7 @@ for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
     heldSignal ??= sig;
   });
 }
-const PS_TIMEOUT_MS = 3000;
+const PS_TIMEOUT_MS = 800;
 
 const out = openSync(logfile, 'w');
 const child = spawn(cmd, args, { detached: true, stdio: ['ignore', out, out] });

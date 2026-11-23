@@ -59,7 +59,8 @@ function killSleepers(marker: string) {
 
 /** A directory holding a `ps` wrapper, to put first on PATH. With
  * PS_FAIL=<text>, a `ps` call whose arguments contain <text> prints nothing and
- * exits 1; with PS_SLOW=<text>, it first sleeps 1 s; with PS_SHIFT=<text>, its
+ * exits 1; with PS_SLOW=<text>, it first sleeps 0.5 s (under spawn-daemon's
+ * 800 ms `ps` timeout); with PS_SHIFT=<text>, its
  * output has each line's trailing year replaced by 1999 (a different start
  * time). Other calls run the real ps. */
 function psShim(dir: string): string {
@@ -72,7 +73,7 @@ function psShim(dir: string): string {
       '#!/bin/sh',
       'case "$*" in',
       `  *"\${PS_FAIL:-@none@}"*) exit 1 ;;`,
-      `  *"\${PS_SLOW:-@none@}"*) sleep 1 ;;`,
+      `  *"\${PS_SLOW:-@none@}"*) sleep 0.5 ;;`,
       `  *"\${PS_SHIFT:-@none@}"*) '${realPs}' "$@" | sed 's/[0-9][0-9][0-9][0-9]\\( *\\)$/1999\\1/'; exit 0 ;;`,
       'esac',
       `exec '${realPs}' "$@"`,
@@ -269,22 +270,61 @@ describe('stop_recorded (stack-body.sh)', () => {
     }
   });
 
+  test('keeps an interrupted stop\'s records, and fails, when a member cannot be identified', async () => {
+    const marker = newMarker();
+    try {
+      startRecorded(marker);
+      const [child] = sleepers(marker);
+      const log = path.join(dir, 'session-start.log');
+      // As above: interrupt the stop after TERM, leaving the TERM-ignoring child.
+      const first = spawn('bash', [STACK_BODY, '--fn', 'stop_recorded', 'svc', `sleep ${marker}`], {
+        stdio: 'ignore',
+        env: { ...process.env, STACK_STATE_DIR: dir },
+      });
+      const exited = new Promise((resolve) => first.on('exit', resolve));
+      const leader = Number(fs.readFileSync(path.join(dir, 'svc.pid'), 'utf8').split('\n')[0]);
+      const end = Date.now() + 5000;
+      while (!(fs.existsSync(log) && fs.readFileSync(log, 'utf8').includes('stopping svc')) && Date.now() < end) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      while (isAlive(leader) && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+      expect(isAlive(leader)).toBe(false);
+      first.kill('SIGKILL');
+      await exited;
+      expect(sleepers(marker)).toEqual([child]);
+
+      // The next run cannot read start times: the child is alive but unidentified.
+      const bin = psShim(dir);
+      const r = spawnSync('bash', [STACK_BODY, '--fn', 'stop_recorded', 'svc', `sleep ${marker}`], {
+        stdio: 'ignore',
+        timeout: 30_000,
+        env: { ...process.env, STACK_STATE_DIR: dir, PATH: `${bin}:${process.env.PATH}`, PS_FAIL: 'lstart=' },
+      });
+      expect(r.status).toBe(1);
+      expect(sleepers(marker)).toEqual([child]);
+      expect(fs.existsSync(path.join(dir, 'svc.members'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(true);
+    } finally {
+      killSleepers(marker);
+    }
+  });
+
   test('signals nothing, and keeps the record, when the member list cannot be saved', () => {
     const marker = newMarker();
     let leader = 0;
     try {
       startRecorded(marker);
       leader = Number(fs.readFileSync(path.join(dir, 'svc.pid'), 'utf8').split('\n')[0]);
-      fs.chmodSync(dir, 0o555); // .members.tmp cannot be created
+      // A directory where the temporary list goes: the write fails for any
+      // user, root included (permission bits would not stop root).
+      fs.mkdirSync(path.join(dir, 'svc.members.tmp'));
       const r = stopRecorded(marker);
-      fs.chmodSync(dir, 0o755);
       expect(r.status).toBe(1);
       expect(isAlive(leader)).toBe(true);
       expect(sleepers(marker)).toHaveLength(1);
       expect(fs.existsSync(path.join(dir, 'svc.pid'))).toBe(true);
       expect(fs.existsSync(path.join(dir, 'svc.members'))).toBe(false);
     } finally {
-      fs.chmodSync(dir, 0o755);
       if (leader) {
         try {
           process.kill(-leader, 'SIGKILL');
@@ -420,13 +460,13 @@ describe('stop_recorded (stack-body.sh)', () => {
       leader = Number(fs.readFileSync(path.join(dir, 'functions.pid'), 'utf8').split('\n')[0]);
       const record = fs.readFileSync(path.join(dir, 'functions.pid'), 'utf8');
 
-      fs.chmodSync(dir, 0o555); // .members.tmp cannot be created
+      // A directory where the temporary list goes, so saving it fails for any user.
+      fs.mkdirSync(path.join(dir, 'functions.members.tmp'));
       const r = spawnSync('bash', [STACK_BODY, '--fn', 'stop_previous'], {
         encoding: 'utf8',
         timeout: 30_000,
         env: { ...process.env, STACK_STATE_DIR: dir },
       });
-      fs.chmodSync(dir, 0o755);
 
       // fail() reports and exits: nothing after step 1 runs.
       expect(r.stdout).toContain('STACK FAILED: stop the previous functions serve');
@@ -434,7 +474,6 @@ describe('stop_recorded (stack-body.sh)', () => {
       expect(sleepers(marker)).toHaveLength(1);
       expect(fs.readFileSync(path.join(dir, 'functions.pid'), 'utf8')).toBe(record);
     } finally {
-      fs.chmodSync(dir, 0o755);
       if (leader) {
         try {
           process.kill(-leader, 'SIGKILL');
@@ -455,7 +494,7 @@ describe('spawn-daemon.mjs', () => {
     let leader = 0;
     try {
       // A slow start-time read keeps spawn-daemon between the spawn and the
-      // record for 1 s; the TERM lands inside that window.
+      // record for 0.5 s; the TERM lands inside that window.
       const bin = psShim(dir);
       const daemon = spawn('node', [SPAWN_DAEMON, pidfile, path.join(dir, 'svc.log'), '--', 'sleep', marker], {
         stdio: 'ignore',

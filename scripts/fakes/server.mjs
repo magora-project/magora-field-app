@@ -146,6 +146,9 @@ const server = http.createServer((req, res) => {
       send(res, 405, { error: 'POST only' });
       return;
     }
+    // A client that drops mid-body makes `req` emit 'error'; without a
+    // listener that would crash the fake.
+    req.on('error', (err) => log(`fake: /api/insight request error: ${err.message}`));
     req.resume();
     req.on('end', () => send(res, 200, { insight: CANNED_INSIGHT }));
     return;

@@ -2,7 +2,8 @@ import fs from 'fs';
 import path from 'path';
 
 const root = path.resolve(__dirname, '..', '..');
-const read = (p: string) => fs.readFileSync(path.join(root, p), 'utf8');
+// CRLF normalized, so a Windows checkout with autocrlf reads the same text.
+const read = (p: string) => fs.readFileSync(path.join(root, p), 'utf8').replace(/\r\n/g, '\n');
 
 describe('harness', () => {
   test('AGENTS.md has every cloud rule', () => {

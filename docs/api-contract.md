@@ -28,7 +28,7 @@ What the field app calls, one entry per row of spec §3 (`docs/superpowers/specs
 
 - **Source:** `src/lib/listenQueue.js` (`syncQueuedListen`); `supabase/migrations/20260628_listen_phase1_mobile_detections.sql`, `20260701_listen_consent_published.sql`.
 - **Call:** `supabase.from('mobile_detections').insert({...})`, as the signed-in user, after the upload succeeds.
-- **Request:** `id` (client uuid), `user_id` (= auth uid; RLS `insert own detections` checks it), `lat`, `lon` (both `not null`), `status: 'pending'`, `audio_path` (the upload's `path`), `device_info` (jsonb; the portal stores `tz_offset` in it), `detected_at`, `habitat_type`, `canopy_cover`, `water_present`, `disturbance_level`, `observer_notes` (all nullable), `synced_at`, `published: false`.
+- **Request:** `id` (client uuid), `user_id` (= auth uid; RLS `insert own detections` checks it), `lat`, `lon` (both `not null`), `status: 'pending'`, `audio_path` (the upload's `path`), `device_info` (jsonb; the portal stores `tz_offset` in it), `detected_at` (`not null default now()`: send the recording's time, or omit it for the insert time; never `null`), `habitat_type`, `canopy_cover`, `water_present`, `disturbance_level`, `observer_notes` (all nullable), `synced_at`, `published: false`.
 - **Response:** `{ error }`. A unique violation on `id` means the row already exists.
 - The `mobile_detections_enqueue` trigger sends `{ detection_id, audio_path, user_id }` to the pgmq queue `audio_inference` when a row is inserted with `status = 'pending'` and a non-null `audio_path`.
 
