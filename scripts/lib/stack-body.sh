@@ -158,15 +158,14 @@ stop_recorded() {
 
 # record_members <name> <leader pid>: writes .stack/<name>.members, one
 # "<pid> <start time>" line per member of the leader's process group. Called
-# only while the leader is verified alive, so the group ID is the leader's and
-# every member listed is its group's; each is pinned by its own start time.
+# only while the leader is verified alive, so no unrelated process can be in
+# its group. Each row's PID, group and start time come from one `ps` read of
+# that process, so a member that exits and whose PID is reused cannot have the
+# new process's start time recorded against it.
 record_members() {
-  local m t
-  : > "${STATE}/$1.members.tmp"
-  for m in $(group_members "$2"); do
-    t="$(start_time_of "${m}")"
-    [ -n "${t}" ] && printf '%s %s\n' "${m}" "${t}" >> "${STATE}/$1.members.tmp"
-  done
+  LC_ALL=C ps -A -o pid=,pgid=,lstart= 2>/dev/null \
+    | awk -v g="$2" '$2 == g { pid = $1; $1 = ""; $2 = ""; sub(/^ +/, ""); print pid, $0 }' \
+    > "${STATE}/$1.members.tmp"
   mv -f "${STATE}/$1.members.tmp" "${STATE}/$1.members"
 }
 
