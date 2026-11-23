@@ -14,11 +14,13 @@
 // while the child is still this process's unreaped child, so the PID cannot
 // have been reused. The file is written to <pidfile>.tmp and renamed.
 //
-// Exits 0 once the PID file is written; non-zero, with no PID file, if the
-// command could not be started or its start time could not be read.
+// Exits 0 once the PID file is written. Exits non-zero, with no PID file, if
+// the command could not be started, its start time could not be read, or the
+// PID file could not be written; in the last two cases the started command's
+// process group is SIGKILLed first, so nothing is left running unrecorded.
 
 import { spawn, execFileSync } from 'node:child_process';
-import { closeSync, openSync, renameSync, writeFileSync } from 'node:fs';
+import { closeSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 
 const argv = process.argv.slice(2);
 if (argv[2] !== '--' || argv.length < 4) {
@@ -52,19 +54,30 @@ if (child.pid !== undefined) {
   } catch {
     started = '';
   }
-  if (started === '') {
-    // Unrecorded, so nothing could stop it later: stop it now, while it is
-    // still this process's unreaped child (its PID cannot have been reused).
-    say(`no start time for ${cmd} (PID ${child.pid}); stopping it`);
+  // Unrecorded, nothing could stop it later: stop it now, while its leader is
+  // still this process's unreaped child (so its PID, which is also its process
+  // group ID, cannot have been reused).
+  const stopUnrecorded = (why) => {
+    say(`${why}; stopping ${cmd} (process group ${child.pid})`);
     try {
-      process.kill(child.pid, 'SIGKILL');
+      process.kill(-child.pid, 'SIGKILL');
     } catch {
       // already gone
     }
     process.exit(1);
+  };
+  if (started === '') stopUnrecorded(`no start time for PID ${child.pid}`);
+  try {
+    writeFileSync(`${pidfile}.tmp`, `${child.pid}\n${started}\n`);
+    renameSync(`${pidfile}.tmp`, pidfile);
+  } catch (err) {
+    try {
+      rmSync(`${pidfile}.tmp`, { force: true });
+    } catch {
+      // best effort
+    }
+    stopUnrecorded(`cannot write ${pidfile}: ${err.message}`);
   }
-  writeFileSync(`${pidfile}.tmp`, `${child.pid}\n${started}\n`);
-  renameSync(`${pidfile}.tmp`, pidfile);
   child.unref();
   process.exit(0);
 }

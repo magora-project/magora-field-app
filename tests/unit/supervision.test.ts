@@ -141,3 +141,25 @@ describe('stop_recorded (stack-body.sh)', () => {
     }
   });
 });
+
+describe('spawn-daemon.mjs', () => {
+  test('stops the service when its PID file cannot be written', () => {
+    const marker = newMarker();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'supervision-'));
+    try {
+      // The PID file's directory does not exist, so the write fails after the
+      // service has started.
+      const r = spawnSync(
+        'node',
+        [SPAWN_DAEMON, path.join(dir, 'missing', 'svc.pid'), path.join(dir, 'svc.log'), '--', 'sleep', marker],
+        { stdio: 'ignore', timeout: 20_000 },
+      );
+      expect(r.status).toBe(1);
+      expect(sleepersAfter(marker)).toEqual([]);
+      expect(fs.existsSync(path.join(dir, 'missing'))).toBe(false);
+    } finally {
+      killSleepers(marker);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
